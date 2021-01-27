@@ -1,0 +1,598 @@
+---
+title: "Apprentissage statistique par régression"
+subtitle: "DU Intelligence Artificielle Appliquée à la Santé"
+author:
+- name: François Grolleau 
+- name: Raphaël Porcher
+  affiliation: CRESS INSERM UMR 1153
+date: "28 janvier 2021"
+output:
+  html_document:
+    number_sections: no
+    toc: yes
+    toc_float: true
+    toc_depth: 4
+    includes:
+    in_header: hideOutput.script
+  pdf_document:
+    toc: yes
+    
+---
+
+Dans ce tutoriel, vous allez manipuler les données mesurées à l'admission en réanimation de 5000 patients.
+L'objectif se décompose en deux parties :
+
+* Prédire dès l'admission en réanimation d'un nouveau patient sa probabilité de décès à l'hopital.
+* Prédire dès l'admission en réanimation d'un nouveau patient sa durée de séjour en réanimation.
+
+```{r setup, include = TRUE, message = FALSE, warning = FALSE}
+# Nettoyer les variables préexistentes
+rm(list = ls())
+
+# Charger les packages nécessaires pour réaliser les prédictions
+# Si le package n'est pas installé lancer 
+# install.packages("<nom du package>")
+
+library(mice)                   # pour l'imputation des données manquantes
+library(pROC)                   # pour évaluer la discimination par courbes ROC
+library(CalibrationCurves)      # pour évaluer la calibration
+library(gam)                    # pour visualiser la relation entre variable dépendante et indépendantes continues 
+library(glmnet)                 # pour régulariser les modèles par lasso ou ridge
+
+```
+
+# Description des données
+
+Ces données sont un échantillion synthétique de la base de données [MIMIC-III](https://mimic.physionet.org/).
+
+* Variables dépendantes (variables de réponse, à prédire)
+  + *hospital_mortality*: Mortalité hospitalière avec $= 1$ pour décès hospitalier et $= 0$ pour sortie de l'hôpital en vie
+  + *los_icu*: Durée de séjour en réanimation en jours
+
+* Variables indépendantes (covariables à utiliser pour la prédition)
+
+Les colonnes 5 à 19 correspondent aux éléments du score [SAPS II](https://www.mdcalc.com/simplified-acute-physiology-score-saps-ii) évalués par les cliniciens à l'admission des patients.
+Les valeurs plus élevées correspondent à des gravités plus importantes des patients.
+
+  + *age_score*: age
+  + *hr_score*: fréquence cardiaque
+  + *sysbp_score*: pression artérielle systolique
+  + *temp_score*: température
+  + *pao2fio2_score*: PaO2/FiO2 mesure d'oxygénation
+  + *uo_score*: débit urinaire (urine output)
+  + *bun_score*: urée
+  + *wbc_score*: leucocytes (white blood cells)
+  + *potassium_score*: kaliémie
+  + *sodium_score*: natrémie
+  + *bicarbonate_score*: bicarbonate
+  + *bilirubin_score*: bilirubin
+  + *gcs_score*: score de Glasgow
+  + *comorbidity_score*: maladie chronique
+  + *admissiontype_score*: type d'admission
+  + *bilirubin_score*: bilirubin
+
+Les autres colonnes correspondent à d'autres éléments
+
+  + *gender*: F/M pour Female / Male
+  + *CURR_CAREUNIT_transfers*: MICU / SICU pour réanimation médicale / réanimation chirurgicale
+  + *weight*: poids (kg)
+  + *bun_min*: urée maximale (mM) dans les 24 premières heures
+  + *hemoglobin_max*: hemoglobine maximale (g/dl) dans les 24 premières heures
+  + *height*: taille (cm)
+  + *lactate_max*: lactate maximal (mM) dans les 24 premières heures
+  + *creatinine_max*: creatinine maximale (mg/dl) dans les 24 premières heures
+  + *ptt_max*: TCA maximal dans les 24 premières heures
+  + *first_icu_stay*: TRUE/FALSE premier séjour en réanimation
+
+Vous utiliserez une nouvelle base de données, indépendante de la première pour évaluer la qualité de vos prédictions.
+
+Ci dessous, nous chargons les données en .csv et les décrivons rapidement avec la commande `summary`.
+En cas de difficulté pour importer les données vous pouvez utiliser la commande `getwd()` pour savoir où R cherche les données et `setwd()` pour modifier l'endroit où R cherche les données.
+Par exemple `setwd("/Users/Francois/DU-IA-Sante")`
+
+---
+
+```{r, message=FALSE}
+# Chargeons les données
+trainset <- read.csv('icu_training.csv')
+
+# décrivons rapidement avec la commande summary
+summary(trainset)
+```
+
+Le résultat de la commande `summary` ne montre pas de données manquantes, cette base de données synthétique est complète.
+Il y a deux variables codées en charctères `gender`et `CURR_CAREUNIT_transfers` et une variable logique `first_icu_stay`.
+Recodons les en facteurs, ce qui sera plus facilement manipulable par la suite.
+
+```{r}
+trainset$gender <- factor(trainset$gender)
+trainset$CURR_CAREUNIT_transfers <- factor(trainset$CURR_CAREUNIT_transfers)
+```
+
+Regardons maintenant plus en détail les variables numériques.
+```{r, fig.width=10, fig.height=10}
+# Nous découpons l'espace de visualisation en 30 sous espaces : 5 lignes et 6 colones
+par(mfrow=c(5,6))
+
+#  Nous réalisation itérativement un histogramme de chacune des variables numérique
+for(i in which(sapply(trainset, is.numeric)==TRUE)) {
+hist(trainset[,i], main=names(trainset)[i], xlab="")
+        }   
+```
+
+# Régression linéaire
+
+Le lactate, ici codé `lacate_max` et est un marqueur d'insuffisance circulatoire et métabolique aigüe. À priori de mauvais pronostique... Voyons voir sil les valeurs élevées sont associées à des durées de séjours plus longues.
+
+```{r, fig.width=5, fig.height=5, message=FALSE}
+# Pour reinitialiser l'espace de visualisation nous pouvons utiliser la commande dev.off()
+
+# Utilisons la commande plot pouver évaluer la relation entre los_icu en ordonnée et lactate_max en abscisse
+# Avec un cercle plein par observation pch=19 
+# De petite taille cex=.1
+# La commande rgb permet de choisir la couleur bleu avec une transparence alpha réglée
+
+plot(los_icu~lactate_max, pch=19, cex=.1, col=rgb(0,0,1, alpha=.2), data=trainset)
+```
+
+Essayons une régression linéaire de `los_icu` sur `lactate_max` avec un polynôme de degré 2.
+
+```{r}
+fit <- lm(los_icu~poly(lactate_max,2), data=trainset)
+summary(fit)
+```
+
+Regardons la figure de diagnostique de ce modèle linéaire.
+
+```{r, fig.width=5, fig.height=5, message=FALSE}
+par(mfrow=c(2,2))
+plot(fit)
+```
+
+La normalité des résidus ne semble pas bien vérifiée (figure en haut à droite). Les résidus semblent également hétérosédastiques (figure en haut à gauche). Les conditions de validité du modèle linéaire ne semblent pas bien vérfiées. Essayons avec une transformation logarithmique de `los_icu`. 
+
+```{r, fig.width=5, fig.height=5, message=FALSE, warning = FALSE}
+# Nous créons une nouvelle variable log de los_icu
+trainset$log_los_icu <- log(trainset$los_icu)
+# Cette variable devient notre nouvelle variable dépendante
+fit <- lm(log_los_icu~poly(lactate_max,2), data=trainset)
+# Regardons la figure de diagnostique de ce modèle linéaire ci
+par(mfrow=c(2,2))
+plot(fit)
+```
+
+Cela semble un peu mieux...
+Construisons maintenant sur la figure les prédictions de ce modèle simple avec ses intervalles de confiance et de prédiction.
+
+```{r, fig.width=5, fig.height=5, message=FALSE}
+plot(los_icu~lactate_max, pch=19, cex=.1, col=rgb(0,0,1, alpha=.2), data=trainset)
+
+# Nous utilisons l'exponetielle des prédictions (notre modèle prédit désormais le logarithme des durées de séjours)
+# Cette commande n'est pas simple au premier abord
+# Nous utilisons les fonctions sort prédict et exp pour faire des prédictions à partir des données déjà observées 'trainset$lactate_max' avec notre modèle 'fit'.
+
+lines(sort(trainset$lactate_max),
+      exp(predict(fit, newdata = data.frame(lactate_max=sort(trainset$lactate_max)))),
+      col="red", type="l", lwd=2)
+
+# Ajoutons les intervalles de confiance
+lines(sort(trainset$lactate_max),
+      exp(predict(fit, newdata = data.frame(lactate_max=sort(trainset$lactate_max)),
+                  interval ="confidence")[,2]),
+      col="red", type="l", lty=2, lwd=2)
+
+lines(sort(trainset$lactate_max),
+      exp(predict(fit, newdata = data.frame(lactate_max=sort(trainset$lactate_max)),
+                  interval ="confidence")[,3]),
+      col="red", type="l", lty=2, lwd=2)
+
+# Ajoutons les intervalles de prédictions
+lines(sort(trainset$lactate_max),
+      exp(predict(fit, newdata = data.frame(lactate_max=sort(trainset$lactate_max)),
+                  interval ="prediction")[,2]),
+      col="red", type="l", lty=2, lwd=1)
+
+lines(sort(trainset$lactate_max),
+      exp(predict(fit, newdata = data.frame(lactate_max=sort(trainset$lactate_max)),
+                  interval ="prediction")[,3]),
+      col="red", type="l", lty=2, lwd=1)
+```
+
+Les intervalles de prédictions sont beaucoup plus larges que les intervalles de confiance.
+
+Plus haut, nous avions arbitrairement choisi d'utiliser un polynôme de degré 2. Essayons de visualiser plus en détail la relation qui existe entre `los_icu` et `lactate_max` avec la fonction s (pour penalized splines) et la commande gam (pour general additive model).
+```{r, fig.width=5, fig.height=5, message=FALSE}
+par(mfrow=c(2,2))
+# essayons avec 3 degrés de libertés
+plot(gam(log_los_icu~s(lactate_max,3), data=trainset), main="3 dl")
+# essayons avec 5 degrés de libertés
+plot(gam(log_los_icu~s(lactate_max,5), data=trainset), main="5 dl")
+# essayons avec 7 degrés de libertés
+plot(gam(log_los_icu~s(lactate_max,7), data=trainset), main="7 dl")
+# laissons maintenant gam determiner automatiquement le nombre de degrés de libertés
+# (la technique utilisée est cross-validation leave one out)
+plot(gam(log_los_icu~s(lactate_max), data=trainset), main="dl determiné par CV")
+```
+
+3 degrés de liberté ou moins semble raisonnable ici.
+De plus, en se fiant à la connaissance du domaine, un lactate modérément élevé semble cohérent avec un allongement des durées des séjours. En revanche, si le lactate est extrêmement élevé, les patients sont très grave et décèdent ce qui et raccourci probablement les durées de séjour.
+C'est cohérent avec ce que l'on observe avec 3 degrés de liberté. Un polynôme de degré 2 ou 3 semble raisonnable. Un polynôme de degré plus élevé risque probablement de capturer le bruit des données.
+
+Pour utiliser également l'effet additif du poids (`weight`) afin de faire des prédictions, on ajoute un signe `+` entre les prédicteurs
+```{r}
+fit <- lm(log_los_icu~weight + poly(lactate_max,2), data=trainset)
+summary(fit)
+```
+
+Pour utiliser l'effet multiplicatif du poids (`weight`) afin de faire des prédictions, on ajoute un parametre d'interaction `*` entre les predicteurs
+```{r}
+fit <- lm(log_los_icu~weight * lactate_max, data=trainset)
+summary(fit)
+```
+
+Dans tous les cas dans un modèle linéaire, il faut penser à verifier les hypothèses de validité avec la commande `plot(fit)`. Les predictions seront le plus souvent de meilleure qualité si celles si sont vérifiées.
+
+
+# Régression logistique
+
+Commencons par visualiser la relation entre mortalité hospitalière, `hospital_mortality` et `age` avec les commandes `plot`, `gam`et `s`.
+
+```{r, fig.width=5, fig.height=5, message=FALSE}
+plot(gam(hospital_mortality~s(age), data=trainset))
+```
+
+Avec un nombre de degrés de liberté déterminé automatiquement, la mortalité hospitalière semble augmenter linéairement avec l'âge. Les patients plus agés meurent plus souvent : cela semble faire du sens. Nous n'utiliserons pas de polynôme pour ce premier modèle.
+Nous utilisons la commande `glm` avec l'argument `family = "binomial"` pour développer ce premier modèle de régression logistique.
+
+```{r}
+fit <- glm(hospital_mortality~age, family = "binomial", data=trainset)
+summary(fit)
+```
+
+Faisons maitenant une figure représentant les prédictions de ce modèle. 
+```{r, fig.width=5, fig.height=5, message=FALSE}
+# Décrivons d'abord les observations décès hospitalier 1 vs 0 en fonction des âges à l'admission pour chaque patient de la base de données
+plot(hospital_mortality~age, data=trainset, cex=.5, pch=3, col=rgb(0,0,1, alpha=.05))
+
+# Ajoutons les probabilités prédites par le modèle avec la commande predict et l'argument type="response"
+lines(sort(trainset$age),
+      predict(fit, newdata=data.frame(age=sort(trainset$age)), type="response"),
+      type="l", col="green")
+
+# Ajoutons une légende à droite 
+legend("right", legend="Predicted Probability", lty=1, col="green", cex=.7, box.lty=0)
+```
+
+La créatine à l'admission, ici codée `creatinine_max` est un marqueur de fonction rénale important probablement associé à la survie. Essayons d'intégrer la créatinine dans notre modèle de régression logistique.
+
+Pour utiliser l'effet additif de la créatinine et l'âge afin de faire des prédictions, on ajoute un signe `+` entre les prédicteurs. Après exploration de la relation entre mortalité hospitalière et créatinine avec les commandes `plot`, `gam`et `s` (non montré ici), nous choisissons d'utiliser un polynôme de degré 2.
+
+```{r}
+fit <- glm(hospital_mortality~age + poly(creatinine_max,2), family = "binomial", data=trainset)
+summary(fit)
+```
+
+Pour évaluer la performance de ce modèle de regression logistique, commençons par étudier sa discrimination.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE}
+roc2 <- roc(fit$data$hospital_mortality, fit$fitted.values)
+plot(roc2, print.auc=TRUE)
+```
+
+L'aire sous la courbe ROC est aussi appelée AUC (Area Under the Curve) ou C-statistic. C'est une probabilité, elle varie donc entre 0 et 1 et les valeurs élevées correspondent à une meilleure discrimination. Une valeur de 0.5 indique que le modèle fait des prédictions qui ne sont pas de meilleure qualité que des prédictions faites totalement au hasard (imaginer les prédictions faites par une pièce de monnaie). 
+
+La valeur de 0.685 est ici mesurée à partir des données de développement du modèle. Ndas ces conditions cela indique que le modèle n'est certainement pas très discriminant.
+Ce modèle à 2 variables est probablement trop simple pour faire des prédictions précises.
+
+---
+
+Toujours pour évaluer la performance du modèle, étudions maintenant sa calibration.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE, warning=FALSE, results='hide'}
+# fit$fitted.values correspond aux probabilités prédites par le modèle fit
+# fit$data$hospital_mortality aux occurrences observées de décès hospitalier
+# l'argument g défini le nombre de quantile souhaité
+
+val.prob.ci.2(fit$fitted.values, fit$data$hospital_mortality,
+              g = 5, col.ideal="blue", smooth = "loess")
+```
+
+Dans cinq quantiles de probabiltés prédites nous comparons les probabiltés prédites par le modèle aux proportions observées de décès hospitalier.
+Des intervalles de confiance pour chaque quantile et un lissage sont également calculés automatiquement.
+
+Dans chaque quantile, les probabilités prédites de décès hospitalier sont proches des proportions observées. La courbe de lissage est proche de la diagonale ce qui est aussi un signe de bonne calibration.
+
+Mais il s'agit d'une figure de calibration réalisée à partir des mêmes données que celles qui ont permis de développer le modèle. Rien ne garantit que la calibration soit de bonne qualité quand nous évalueront le modèle à partir de données différentes de celles d'entraînement.
+
+NB : le modèle ne fait aucune prédiction de probablité de décès hospitalier supérieure à 0.33 dans cet échantillon. Cela explique pourquoi les quantiles sont décallés vers la gauche.
+
+# Régularisation
+
+Pour régulariser un modèle, il est très important de normaliser les variables pour éviter que certaines variables soient plus pénalisées que d'autres simplement du fait de leur échelle ou de leur unité. Commençons par créer une matrice des variables indépendantes normalisés.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# Définissons les variables indépendantes que l'on souhaite utiliser
+
+numvar <- c("age_score",            "hr_score",                  "sysbp_score",            
+"temp_score",             "pao2fio2_score",            "uo_score",
+"bun_score",              "wbc_score",                 "potassium_score",
+"sodium_score",           "bicarbonate_score",         "bilirubin_score",
+"gcs_score",              "comorbidity_score",         "admissiontype_score",
+"age",                    "weight",                    "bun_min",
+"hemoglobin_max",         "height",                    "lactate_max", 
+"creatinine_max",         "ptt_max") 
+
+# Sélectionnons les variables de trainset qui portent ces noms 
+# Glmnet n'utilise que des matrices entrée, nous convertissons donc l'objet en matrice
+xvars <- as.matrix(trainset[, numvar])
+
+# Définissons la variable indépendante que l'on souhaite prédire
+continuous_outcome <- "los_icu"
+
+# Sélectionnons cette variable à partir de trainset
+ycont <- trainset[, continuous_outcome]
+
+# Pour normaliser les variables vous pouvez utiliser la commande scale : scale(xvars)
+# Mais il n'est pas simple de voir exactement ce qu'elle execute.
+
+# Détaillons manuellement les étapes
+# Nous recuperons d'abord la moyenne puis l'écart type de chaque variable
+xvars_mean <- apply(xvars, 2, mean)
+xvars_sd <- apply(xvars, 2, sd)
+
+# Nous créons une liste vide
+xvars_prep <- list()
+
+# Nous créons une boucle sur les colonnes.
+for (i in 1:ncol(xvars)){
+# La moyenne de chaque colonne est soustraite à toutes les valeurs de cette colonne
+# Le résultat est divisé par l'écart-type de la colonne et stockée dans un élément de la liste de même numéro que celui de la colonne.
+xvars_prep[[i]] <-(xvars[,i]-xvars_mean[i])/xvars_sd[i]
+}
+
+# Nous convertissons la liste en matrice
+xvars_scaled <- sapply(xvars_prep, c)
+
+# Nommons à nouveau les colonnes de cette matrice de variables normalisées
+colnames(xvars_scaled) <- colnames(xvars)
+```
+
+Dans cet exemple, nous n'utilisons que des variables continues ; si vous souhaitez utiliser des variables catégorielles il faut probablement les recoder en 0 et 1 et les normaliser également.
+
+
+### LASSO
+
+Nous sommes prêt pour régulariser un modèle de regression linéaire multiple.
+`glmnet`prend en entrée une matrice de prédicteurs normalisés (ici `xvars_scaled`) et un vecteur pour la variable de réponse (ici `ycont`).
+L'argument `alpha`= 1 précise que l'on souhaite utiliser LASSO.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE}
+# Plusieurs modèles sont développés en même temps pour différentes valeurs de pénalisation.
+fit <- glmnet(xvars_scaled, ycont, alpha=1)
+
+#  Dessinons les valeurs de coefficients correspondant à différentes valeurs de pénalisation lambda.
+plot(fit, xvar = "lambda", label = TRUE)
+```
+
+Plus lambda est grand (et donc log lambda est grand), plus les modèles sont pénalisés et leurs coefficients proches de 0.
+Comme il s'agit de LASSO, certains coefficients atteignent 0 avant pénalisation maximale. Cela illustre le fait qu'en plus de limiter le surapprentissage, en pénalisant partiellement un modèle, LASSO permet la sélection de variables.
+
+```{r}
+# Par curiosité on peut chercher à savoir quelle est la variable numéro 5 qui a un grand coefficient avant pénalisation et ne semble que très tardivement pénalisée.
+colnames(xvars_scaled)[5]
+```
+
+Le score de défaillance respiratoire semble très associé à des durées de séjour longues (le coefficient est positif). Cela semble cohérent : les patients intubés-ventilés restent souvent plus longtemps en réanimation.
+
+---
+
+Essayons maintenant de déterminer la valeur de pénalisation optimale (c'est à dire le lambda optimal). Pour cela, nous allons utiliser la technique de validation croisée ou cross validation avec la commande `cv.glmnet`.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE}
+# l'agument nfold determine le nombre de coupes pour la validation croisée
+# l'agrument type.measure définit le type d'erreurs que l'on souhaite minimiser
+# "mse" signifie mean squared error
+# alpha=1 correspond toujours à LASSO
+cvfit <- cv.glmnet(xvars_scaled, ycont, type.measure = "mse", alpha=1, nfold=10)
+
+# Nous traçons la courbe des erreurs en fonction de la pénalisation
+plot(cvfit)
+```
+
+Nous pouvons récupérer les valeurs optimales de lambdas qui correspondent aux traits verticaux observés sur la figure.
+```{r}
+log(cvfit$lambda.min)
+log(cvfit$lambda.1se)
+```
+
+```{r, echo=FALSE}
+nonzero <- dim(predict(cvfit, type = "nonzero", s = cvfit$lambda.min))[1]
+```
+Avec `cvfit$lambda.min` le modèle retient `r nonzero` variables sur 23
+Avec `cvfit$lambda.1se` le modèle ne retient aucune variable, seulement l'intercept (qui n'est pas pénalisé). Ce modèle est probablement trop parcimonieux pour faire des prédictions performantes.
+
+Nous pouvons récupérer les coefficients du modèle correspondant à la valeur optimale de lambda `cvfit$lambda.min`. 
+```{r}
+coef(cvfit, s = "lambda.min")
+```
+NB : dans un modèle régularisé, il n'est pas évident d'obtenir la variance ou la covariance des coefficients. Par conséquent, les coefficients ci-dessus sont reportés sans intervalles de confiance.
+
+---
+
+Nous pouvons faire des prédictions avec ce modèle pénalisé à la valeur de lambda `cvfit$lambda.min` 
+```{r}
+# Prediction de durées de séjours pour les 5 premiers exemples
+predict(fit, newx = xvars_scaled[1:5,], type = "response", s = cvfit$lambda.min)
+```
+
+### Ridge
+
+Utilisons maintenant Ridge pour pénaliser un modèle de régression logistique avec `glmnet`.
+L'argument `alpha`=0 précise que l'on souhaite utiliser Ridge.
+
+NB : un argument `alpha` intermédiaire entre 0 et 1 correspond à un intermédiaire entre LASSO et Ridge appellé elastic-net.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE}
+# Définissons la variable indépendante binanire que l'on souhaite prédire
+binary_outcome <- "hospital_mortality"
+
+# Sélectionnons cette variable à partir de trainset
+ybin <- trainset[, binary_outcome]
+
+# Plusieurs modèles sont développés en même temps pour différentes valeurs de pénalisation.
+# family = 'binomial' précise que l'on souhaite utiliser un modèle de regression logistique.
+fit <- glmnet(xvars_scaled, ybin, family = "binomial", alpha=0)
+
+#  Dessinons les valeurs de coefficients correspondant à différentes valeurs de pénalisation lambd
+plot(fit, xvar = "lambda", label = TRUE)
+```
+
+Même avec une pénalisation  importante, les coefficients n'atteignent jamais strictement zéro. Ridge permet de limiter le surapprentissage, mais ne permet pas la sélection de variables.
+
+---
+
+Essayons maintenant de déterminer la valeur de pénalisation optimale (c'est à dire le lambda optimal) par technique de validation croisée en utilisant la commande `cv.glmnet`.
+``` {r, fig.width=5, fig.height=5, message=FALSE}
+# l'agument nfold determine le nombre de coupes pour la validation croisée
+# l'agrument type.measure définit le type d'erreurs que l'on souhaite minimiser
+# "auc" signifie area under the curve, la mesure de discrimination vue plus haut
+# alpha=0 correspond toujours à Ridge
+cvfit <- cv.glmnet(xvars_scaled, ybin, family = "binomial", type.measure = "auc", alpha=0, nfold=10)
+
+# Nous traçons la courbe des erreurs en fonction de la pénalisation
+plot(cvfit)
+```
+```{r, echo=FALSE}
+lambdamin <-cvfit$lambda.min
+loglambdamin <- log(lambdamin)
+```
+La valeur de lambda permettant d'obtenir la meilleure discrimination par validation croisée est de `r lambdamin` soit log(lambda) = `r loglambdamin`. C'est ce qui correspond à la ligne pointillée de gauche sur la figure ci-dessus.
+
+Nous pouvons récupérer les coefficients du modèle correspondant à la valeur optimale de lambda `cvfit$lambda.min`. 
+```{r}
+coef(cvfit, s = "lambda.min")
+```
+
+Nous pouvons faire des prédictions avec ce modèle pénalisé à la valeur de lambda `cvfit$lambda.min` 
+```{r}
+# Prediction des probabilités de décès hospitalier pour les 5 premiers exemples
+predict(cvfit, newx = xvars_scaled[1:5,], s = "lambda.min", type = "response")
+```
+
+# Validation externe
+
+Nous allons utiliser une seconde base de données, indépendante de la première pour évaluer la performance du modèle de régression logistique régularisé que nous avons développé à l'étape précédente.
+
+``` {r, fig.width=5, fig.height=5, message=FALSE, warning=FALSE, results='hide'}
+# Commençons par charger les données de cette nouvelle base
+testset <- read.csv('icu_testing.csv')
+
+# Nous devons sélectionner les prédicteurs et les convertir au format matrice afin que glmnet puisse les exploiter.
+xvars_test <- as.matrix(testset[, numvar])
+
+# Nous devons normaliser ces prédicteurs de manière identique à la normalisation effectuée sur la première base.
+# Pour cela nous utiliserons les valeurs de moyennes et d'écart-types collectés sur la première base de données (base d'entraînement du modèle).
+xvars_prep <- list()
+for (i in 1:ncol(xvars_test)){
+xvars_prep[[i]] <-(xvars_test[,i]-xvars_mean[i])/xvars_sd[i]
+}
+xvars_test_scaled_identically <- sapply(xvars_prep, c)
+
+# Sélectionnons la variable indépendante binanire que l'on souhaite prédire dans la nouvelle base de donnée (base de test du modèle).
+ybin_test <- testset[, binary_outcome]
+
+# Stockons dans preds_test les probabilités prédites de décès hospitalier pour tous les exemples de la base de test.
+preds_test <- predict(cvfit, newx = xvars_test_scaled_identically, s = "lambda.min", type = "response")
+
+# Comparons probabilités prédites et proportions observées pour évaluer la calibration du modèle dans cette base données indépendante.
+val.prob.ci.2(preds_test, ybin_test, g = 5, col.ideal="blue", smooth = "loess")
+```
+
+La calibration de modèle de régression logistique régularisé semble correcte au vu de la position des quantiles et de la courbe de lissage proche de la diagonale.
+`val.prob.ci.2` permet aussi d'évaluer la discrimination du modèle grâce à la mesure `c-statistic` noté en haut à gauche sur la figure.
+
+# Imputation multiple
+
+Nous avons jusqu'ici utilisé des données synthétiques pour lesquelles il n'y avait aucune données manquantes. En pratique, les données manquantes sont fréquentes.
+Commençons par charger une base de données réelle avec des données manquantes.
+```{r, message=FALSE}
+# Chargeons les données
+missingset <- read.csv('raw_data.csv')
+
+# Evaluons le pourcentage de données manquantes par colonne
+apply(missingset, 2, function(x) mean(is.na(x)))
+```
+
+Une bonne manière de tenir compte des données manquantes est souvent de réaliser des imputation multiples.
+Mais avant de faire quoi que soit, nous devons d'abord essayer de comprendre le mécanisme qui a conduit à ces données manquantes.
+
+Y-a-t-il des données manquantes dont on ne peut à priori absolument pas prédire la valeur en ayant connaissance des autres données observées ?
+
+Y-a-t-il des données qui sont manquantes, à cause de la valeur de ces données elle-même ?
+(c'est par exemple le cas si dans un questionnaire les valeurs de salaires sont manquantes parce que les individus avec un salaire élevé ne reportent jamais leur salaire.)
+
+Dans ces cas particuliers, on parle de données *missing not at random* et l'imputation multiple ne permet pas de régler le problème.
+
+Dans cette section, après discussion avec les personnes qui connaissent la manière dont les données ont étés recueillies nous acceptons que les données ne sont pas *missing not at random*. L'imputation multiple est alors possible et recommandée.
+
+```{r, warning=FALSE}
+# Utilisons mice avec l'argument maxit=0 pour produire une matrice de prédiction sans faire aucune imputation
+imp <- mice(missingset, maxit=0)
+
+# Stockons cette matrice de prédiction dans l'objet preM
+predM <- imp$predictorMatrix
+
+# Regardons un peu à quoi correspondent les premières lignes et colonnes de cet objet
+predM[1:7,1:7]
+```
+
+Cette matrice nous permet de définir quelles données doivent être utilisées pour prédire chacune de données manquantes.
+Les lignes corresondent aux valeurs à prédire, les colonnes aux valeurs à utiliser pour faire les prédictions.
+
+Ici clairement les variables identifiantes `subject_id`, `hadm_id` ne sont d'aucun interêt pour prédire les valeurs maquantes.
+C'est probablement la même chose pour `sapsii`et `sapsii_prob` qui correspondent aux valeurs d'un modèle et ne sont pas directement receuillies par les médecins.
+
+```{r}
+# Définisson les variables que l'on ne souhaite pas utiliser pour les imputations
+nonpredictors <- c("subject_id","hadm_id","sapsii","sapsii_prob")
+
+# Attribuons la valeur zéro aux colonnes qui leur correspondent dans la matrice de prédiction
+predM[,nonpredictors]<-0
+```
+
+Nous sommes maintenant prêts pour faire les imputations multiples.
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+# Définissons une graine pour la reproductibilité
+set.seed(123)
+
+# Utilisons mice avec la nouvelle matrice de prediction
+# L'argument m=4 signifie que nous souhaitons imputer 4 datasets complets
+# Cette commande parfois peut être longue à exécuter
+impdata<-mice(missingset, m=4, predictorMatrix = predM)
+
+# Stokons le premier dataset imuputé dans l'objet imp1 avec la commande complete
+imp1 <- complete(impdata, 1)
+```
+
+Evaluons le pourcentage de données manquantes par colonne dans cette première base de données imputée.
+```{r}
+apply(imp1, 2, function(x) mean(is.na(x)))
+```
+
+Il n'y a plus aucune donnée manquante dans cette base de données imputée.
+
+---
+
+Pour développer des modèles de regression dans plusieurs base de données imputées nous pouvons appliquer les commandes `summary` et `pool` à l'objet `impdata`
+```{r}
+summary(pool(with(impdata,
+                  glm(hospital_mortality~age+poly(creatinine_max,2), family = "binomial"))))
+```
+
+Ici, nous avons créé un simple modèle de régression logistique à partir de 4 bases de données imputées. La commande `pool` applique la règle de Rubin ce qui permet d'obtenir une estimation non baisée des coefficients et de leurs variances (et donc également de leurs intervalles de confiance).
+
+---
+Pour appliquer la régularisation dans des bases de données imputées, la règle de Rubin n'est pas applicable. Différentes méthodes sont possibles. Voir [Musoro et al. Validation of prediction models based on lasso regression with multiply imputed data. BMC Medical Research Methodology. 2014.](https://www.google.com/search?q=bmc+medical+research+methodology&oq=bmc+med&aqs=chrome.1.0l2j69i57j0l3j69i60l2.3855j1j7&sourceid=chrome&ie=UTF-8)
+
+
