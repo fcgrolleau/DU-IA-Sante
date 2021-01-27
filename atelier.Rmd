@@ -49,6 +49,7 @@ Ces données sont un échantillion synthétique de la base de données [MIMIC-II
   + *hospital_mortality*: Mortalité hospitalière avec $= 1$ pour décès hospitalier et $= 0$ pour sortie de l'hôpital en vie
   + *los_icu*: Durée de séjour en réanimation en jours
 
+
 * Variables indépendantes (covariables à utiliser pour la prédition)
 
 Les colonnes 5 à 19 correspondent aux éléments du score [SAPS II](https://www.mdcalc.com/simplified-acute-physiology-score-saps-ii) évalués par les cliniciens à l'admission des patients.
@@ -125,7 +126,7 @@ hist(trainset[,i], main=names(trainset)[i], xlab="")
 Le lactate, ici codé `lacate_max` et est un marqueur d'insuffisance circulatoire et métabolique aigüe. À priori de mauvais pronostique... Voyons voir sil les valeurs élevées sont associées à des durées de séjours plus longues.
 
 ```{r, fig.width=5, fig.height=5, message=FALSE}
-# Pour reinitialiser l'espace de visualisation nous pouvons utiliser la commande dev.off()
+# Pour réinitialiser l'espace de visualisation nous pouvons utiliser la commande dev.off()
 
 # Utilisons la commande plot pouver évaluer la relation entre los_icu en ordonnée et lactate_max en abscisse
 # Avec un cercle plein par observation pch=19 
@@ -443,7 +444,7 @@ ybin <- trainset[, binary_outcome]
 # family = 'binomial' précise que l'on souhaite utiliser un modèle de regression logistique.
 fit <- glmnet(xvars_scaled, ybin, family = "binomial", alpha=0)
 
-#  Dessinons les valeurs de coefficients correspondant à différentes valeurs de pénalisation lambd
+#  Dessinons les valeurs de coefficients correspondant à différentes valeurs de pénalisation lambda
 plot(fit, xvar = "lambda", label = TRUE)
 ```
 
@@ -593,6 +594,6 @@ summary(pool(with(impdata,
 Ici, nous avons créé un simple modèle de régression logistique à partir de 4 bases de données imputées. La commande `pool` applique la règle de Rubin ce qui permet d'obtenir une estimation non baisée des coefficients et de leurs variances (et donc également de leurs intervalles de confiance).
 
 ---
-Pour appliquer la régularisation dans des bases de données imputées, la règle de Rubin n'est pas applicable. Différentes méthodes sont possibles. Voir [Musoro et al. Validation of prediction models based on lasso regression with multiply imputed data. BMC Medical Research Methodology. 2014.](https://www.google.com/search?q=bmc+medical+research+methodology&oq=bmc+med&aqs=chrome.1.0l2j69i57j0l3j69i60l2.3855j1j7&sourceid=chrome&ie=UTF-8)
+Pour appliquer la régularisation dans des bases de données imputées, la règle de Rubin n'est pas applicable. Différentes méthodes sont possibles. Voir [Musoro et al. Validation of prediction models based on lasso regression with multiply imputed data. BMC Medical Research Methodology. 2014.](https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/1471-2288-14-116)
 
 
