@@ -33,6 +33,11 @@ rm(list = ls())
 # Si le package n'est pas installé lancer 
 # install.packages("<nom du package>")
 
+# 3 lignes a exécuter uniquement a la première exécution 
+#install.packages("devtools")    # si non déjà installé  
+#require(devtools)
+#install_git("https://github.com/BavoDC/CalibrationCurves")
+
 library(mice)                   # pour l'imputation des données manquantes
 library(pROC)                   # pour évaluer la discimination par courbes ROC
 library(CalibrationCurves)      # pour évaluer la calibration
@@ -70,7 +75,6 @@ Les valeurs plus élevées correspondent à des gravités plus importantes des p
   + *gcs_score*: score de Glasgow
   + *comorbidity_score*: maladie chronique
   + *admissiontype_score*: type d'admission
-  + *bilirubin_score*: bilirubin
 
 Les autres colonnes correspondent à d'autres éléments
 
