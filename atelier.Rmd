@@ -60,6 +60,7 @@ Ces données sont un échantillion synthétique de la base de données [MIMIC-II
 
 Les colonnes 5 à 19 correspondent aux éléments du score [SAPS II](https://www.mdcalc.com/simplified-acute-physiology-score-saps-ii) évalués par les cliniciens à l'admission des patients.
 Les valeurs plus élevées correspondent à des gravités plus importantes des patients.
+    
   + *age_score*: age
   + *hr_score*: fréquence cardiaque
   + *sysbp_score*: pression artérielle systolique
@@ -77,6 +78,7 @@ Les valeurs plus élevées correspondent à des gravités plus importantes des p
   + *admissiontype_score*: type d'admission
 
 Les autres colonnes correspondent à d'autres éléments
+
   + *gender*: F/M pour Female / Male
   + *CURR_CAREUNIT_transfers*: MICU / SICU pour réanimation médicale / réanimation chirurgicale
   + *weight*: poids (kg)
